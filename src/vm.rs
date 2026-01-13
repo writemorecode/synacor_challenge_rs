@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use crate::error::VMError;
 
 #[derive(Debug, PartialEq)]
@@ -52,7 +54,7 @@ impl VM {
         assert!(mem_slice.len() <= MEMORY_SIZE, "Memory slice too large.");
         let mem = {
             let mut full_mem = [0u16; MEMORY_SIZE];
-            full_mem[..mem_slice.len()].copy_from_slice(&mem_slice);
+            full_mem[..mem_slice.len()].copy_from_slice(mem_slice);
             full_mem
         };
         Self::new_with_memory(mem)
@@ -71,17 +73,13 @@ impl VM {
         Ok(value)
     }
 
-    pub fn next_op(&mut self) -> Result<Op, VMError> {
+    fn decode_op(&mut self) -> Result<Op, VMError> {
         let value = self.read_value_at_pc()?;
-        // let op = Op::try_from(value)?;
-        // Ok(op)
-
         let Value::Literal(lit_val) = value else {
             return Err(VMError::InvalidOpcode(value));
         };
         let op = match lit_val {
             opcodes::OPCODE_HALT => Op::Halt,
-            // TODO: wrong!
             opcodes::OPCODE_OUT => {
                 let arg_address = self.pc + 1;
                 let Some(&arg_data) = self.memory.get(arg_address) else {
@@ -104,6 +102,26 @@ impl VM {
             Value::Register(reg) => self.registers[reg as usize],
         }
     }
+
+    pub fn run(&mut self) -> Result<(), VMError> {
+        loop {
+            let op = self.decode_op()?;
+            match op {
+                Op::Halt => {
+                    println!("HALTING");
+                    break;
+                }
+                Op::Out(ref value) => {
+                    println!("OUTPUT: '{}'", value);
+                }
+                Op::Noop => {
+                    println!("NOOP");
+                }
+            };
+            self.pc += op.size();
+        }
+        Ok(())
+    }
 }
 
 mod opcodes {
@@ -122,23 +140,22 @@ pub enum Op {
     Noop,
 }
 
-impl TryFrom<Value> for Op {
-    type Error = VMError;
+impl Op {
+    fn size(&self) -> usize {
+        match self {
+            Op::Halt => 1,
+            Op::Out(_) => 2,
+            Op::Noop => 1,
+        }
+    }
+}
 
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        let Value::Literal(lit_val) = value else {
-            return Err(VMError::InvalidOpcode(value));
-        };
-        let op = match lit_val {
-            opcodes::OPCODE_HALT => Op::Halt,
-            // TODO: wrong!
-            opcodes::OPCODE_OUT => Op::Out(value),
-            opcodes::OPCODE_NOOP => Op::Noop,
-            _ => {
-                return Err(VMError::InvalidOpcode(value));
-            }
-        };
-        Ok(op)
+impl Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Literal(lit) => write!(f, "Literal {}", lit),
+            Value::Register(reg) => write!(f, "Register #{}", reg),
+        }
     }
 }
 
@@ -157,18 +174,10 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_opcode() {
-        let value = Value::try_from(opcodes::OPCODE_OUT).expect("");
-        let op = Op::try_from(value).expect("");
-        dbg!(&op);
-        assert!(matches!(op, Op::Out(_)));
-    }
-
-    #[test]
     fn test_decode_halt_op_from_mem() {
         let mem = [opcodes::OPCODE_HALT];
         let mut vm = VM::new_with_memory_slice(&mem);
-        let next_op = vm.next_op();
+        let next_op = vm.decode_op();
         assert!(matches!(next_op, Ok(Op::Halt)));
     }
 
@@ -177,7 +186,15 @@ mod tests {
         let arg_data: u16 = 42;
         let mem = [opcodes::OPCODE_OUT, arg_data];
         let mut vm = VM::new_with_memory_slice(&mem);
-        let next_op = vm.next_op();
+        let next_op = vm.decode_op();
         assert_eq!(next_op, Ok(Op::Out(Value::Literal(arg_data))));
+    }
+
+    #[test]
+    fn test_pc_state_after_op() {
+        let mem = [19, 42];
+        let mut vm = VM::new_with_memory_slice(&mem);
+        let _ = vm.run();
+        assert_eq!(vm.pc, 2);
     }
 }
