@@ -92,6 +92,13 @@ impl VM {
         Ok(value)
     }
 
+    fn decode_value(&self, address: usize) -> Result<Value, VMError> {
+        let Some(&data) = self.memory.get(address) else {
+            return Err(VMError::InvalidMemoryAddress(address));
+        };
+        Value::try_from(data)
+    }
+
     fn decode_op(&mut self) -> Result<Op, VMError> {
         let value = self.read_value_at_pc()?;
         let Value::Literal(lit_val) = value else {
@@ -100,33 +107,34 @@ impl VM {
         let op = match lit_val {
             opcodes::OPCODE_HALT => Op::Halt,
             opcodes::OPCODE_OUT => {
-                let arg_address = self.pc + 1;
-                let Some(&arg_data) = self.memory.get(arg_address) else {
-                    return Err(VMError::InvalidMemoryAddress(arg_address));
-                };
-                let arg_value = Value::try_from(arg_data)?;
+                let arg_value = self.decode_value(self.pc + 1)?;
                 Op::Out(arg_value)
             }
             opcodes::OPCODE_NOOP => Op::Noop,
 
             opcodes::OPCODE_PUSH => {
-                let arg_address = self.pc + 1;
-                let Some(&arg_data) = self.memory.get(arg_address) else {
-                    return Err(VMError::InvalidMemoryAddress(arg_address));
-                };
-                let arg_value = Value::try_from(arg_data)?;
+                let arg_value = self.decode_value(self.pc + 1)?;
                 Op::Push(arg_value)
             }
             opcodes::OPCODE_POP => {
-                let arg_address = self.pc + 1;
-                let Some(&arg_data) = self.memory.get(arg_address) else {
-                    return Err(VMError::InvalidMemoryAddress(arg_address));
-                };
-                let arg_value = Value::try_from(arg_data)?;
-                let Value::Register(_) = Value::try_from(arg_data)? else {
+                let arg_value = self.decode_value(self.pc + 1)?;
+                let Value::Register(_) = arg_value else {
                     return Err(VMError::InvalidRegister(arg_value));
                 };
                 Op::Pop(arg_value)
+            }
+
+            opcodes::OPCODE_ADD => {
+                let d = self.decode_value(self.pc + 1)?;
+                let l = self.decode_value(self.pc + 2)?;
+                let r = self.decode_value(self.pc + 3)?;
+                Op::Add(d, l, r)
+            }
+
+            opcodes::OPCODE_SET => {
+                let reg = self.decode_value(self.pc + 1)?;
+                let val = self.decode_value(self.pc + 2)?;
+                Op::Set(reg, val)
             }
 
             _ => {
@@ -138,7 +146,7 @@ impl VM {
 
     fn read(&self, value: Value) -> u16 {
         match value {
-            Value::Literal(addr) => self.memory[addr as usize],
+            Value::Literal(l) => l,
             Value::Register(reg) => self.registers[reg as usize],
         }
     }
@@ -159,12 +167,14 @@ impl VM {
                     println!("NOOP");
                 }
                 Op::Push(value) => {
+                    println!("Pushing value {}", value);
                     match value {
                         Value::Literal(l) => self.stack.push(l),
                         Value::Register(reg) => self.stack.push(self.registers[reg as usize]),
                     };
                 }
                 Op::Pop(value) => {
+                    println!("Popping into register {}", value);
                     let Some(stack_value) = self.stack.pop() else {
                         return Err(VMError::EmptyStack);
                     };
@@ -172,6 +182,22 @@ impl VM {
                         return Err(VMError::InvalidRegister(value));
                     };
                     self.registers[reg as usize] = stack_value;
+                }
+                Op::Add(d, l, r) => {
+                    let Value::Register(reg) = d else {
+                        return Err(VMError::InvalidRegister(d));
+                    };
+                    let a = self.read(l);
+                    let b = self.read(r);
+                    let c = (a + b) % 32768;
+                    self.registers[reg as usize] = c;
+                }
+                Op::Set(reg, value) => {
+                    let Value::Register(r) = reg else {
+                        return Err(VMError::InvalidRegister(reg));
+                    };
+                    let v = self.read(value);
+                    self.registers[r as usize] = v;
                 }
             };
             self.pc += op.size();
@@ -182,17 +208,22 @@ impl VM {
 
 mod opcodes {
     pub const OPCODE_HALT: u16 = 0;
+    pub const OPCODE_SET: u16 = 1;
     pub const OPCODE_OUT: u16 = 19;
     pub const OPCODE_NOOP: u16 = 21;
 
     pub const OPCODE_PUSH: u16 = 2;
     pub const OPCODE_POP: u16 = 3;
+
+    pub const OPCODE_ADD: u16 = 9;
 }
 
 #[derive(Debug, PartialEq)]
 pub enum Op {
     /// Opcode 0
     Halt,
+    /// Opcode 1
+    Set(Value, Value),
     /// Opcode 19
     Out(Value),
     /// Opcode 21
@@ -201,16 +232,20 @@ pub enum Op {
     Push(Value),
     /// Opcode 3
     Pop(Value),
+    /// Opcode 9
+    Add(Value, Value, Value),
 }
 
 impl Op {
     fn size(&self) -> usize {
         match self {
             Op::Halt => 1,
+            Op::Set(_, _) => 3,
             Op::Out(_) => 2,
             Op::Noop => 1,
             Op::Push(_) => 2,
             Op::Pop(_) => 2,
+            Op::Add(_, _, _) => 4,
         }
     }
 }
@@ -228,7 +263,10 @@ impl Display for Value {
 mod tests {
     use crate::vm::{
         Op, VM, VMError, Value,
-        opcodes::{self, OPCODE_HALT, OPCODE_NOOP, OPCODE_OUT, OPCODE_POP, OPCODE_PUSH},
+        opcodes::{
+            self, OPCODE_ADD, OPCODE_HALT, OPCODE_NOOP, OPCODE_OUT, OPCODE_POP, OPCODE_PUSH,
+            OPCODE_SET,
+        },
     };
 
     fn encode_ops(ops: &[Op]) -> Vec<u16> {
@@ -247,6 +285,17 @@ mod tests {
                 }
                 Op::Pop(value) => {
                     v.push(OPCODE_POP);
+                    v.push(value.into());
+                }
+                Op::Add(d, l, r) => {
+                    v.push(OPCODE_ADD);
+                    v.push(d.into());
+                    v.push(l.into());
+                    v.push(r.into());
+                }
+                Op::Set(dst, value) => {
+                    v.push(OPCODE_SET);
+                    v.push(dst.into());
                     v.push(value.into());
                 }
             }
@@ -291,6 +340,21 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_multi_arg_op() {
+        let mem = [9, 32768 + 1, 2, 32768 + 3];
+        let mut vm = VM::new_with_memory_slice(&mem);
+        let next_op = vm.decode_op();
+        assert_eq!(
+            next_op,
+            Ok(Op::Add(
+                Value::Register(1),
+                Value::Literal(2),
+                Value::Register(3)
+            ))
+        );
+    }
+
+    #[test]
     fn test_pc_state_after_op() {
         let mem = [19, 42];
         let mut vm = VM::new_with_memory_slice(&mem);
@@ -317,5 +381,32 @@ mod tests {
         let mut vm = VM::new_with_memory_slice(&mem);
         vm.run().expect("VM run OK");
         assert_eq!(vm.registers[3], 4);
+    }
+
+    #[test]
+    fn test_set_op() {
+        let ops = [OPCODE_SET, 32768 + 1, 500];
+        let mut vm = VM::new_with_memory_slice(&ops);
+        vm.run().unwrap();
+        assert_eq!(vm.registers[1], 500);
+    }
+
+    #[test]
+    fn test_add_op() {
+        let ops = [
+            OPCODE_SET,
+            32768 + 1,
+            10,
+            OPCODE_SET,
+            32768 + 2,
+            20,
+            OPCODE_ADD,
+            32768 + 3,
+            32768 + 1,
+            32768 + 2,
+        ];
+        let mut vm = VM::new_with_memory_slice(&ops);
+        vm.run().unwrap();
+        assert_eq!(vm.registers[3], 10 + 20);
     }
 }
