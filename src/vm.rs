@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use crate::error::VMError;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Copy, Clone)]
 pub enum Value {
     Literal(u16),
     Register(u16),
@@ -26,6 +26,7 @@ const REGISTER_COUNT: usize = 8;
 pub struct VM {
     registers: [u16; REGISTER_COUNT],
     memory: [u16; MEMORY_SIZE],
+    stack: Vec<u16>,
     pc: usize,
 }
 
@@ -34,6 +35,7 @@ impl Default for VM {
         Self {
             registers: [0u16; REGISTER_COUNT],
             memory: [0u16; MEMORY_SIZE],
+            stack: Vec::new(),
             pc: 0,
         }
     }
@@ -89,6 +91,27 @@ impl VM {
                 Op::Out(arg_value)
             }
             opcodes::OPCODE_NOOP => Op::Noop,
+
+            opcodes::OPCODE_PUSH => {
+                let arg_address = self.pc + 1;
+                let Some(&arg_data) = self.memory.get(arg_address) else {
+                    return Err(VMError::InvalidMemoryAddress(arg_address));
+                };
+                let arg_value = Value::try_from(arg_data)?;
+                Op::Push(arg_value)
+            }
+            opcodes::OPCODE_POP => {
+                let arg_address = self.pc + 1;
+                let Some(&arg_data) = self.memory.get(arg_address) else {
+                    return Err(VMError::InvalidMemoryAddress(arg_address));
+                };
+                let arg_value = Value::try_from(arg_data)?;
+                let Value::Register(_) = Value::try_from(arg_data)? else {
+                    return Err(VMError::InvalidRegister(arg_value));
+                };
+                Op::Pop(arg_value)
+            }
+
             _ => {
                 return Err(VMError::InvalidOpcode(value));
             }
@@ -117,6 +140,21 @@ impl VM {
                 Op::Noop => {
                     println!("NOOP");
                 }
+                Op::Push(value) => {
+                    match value {
+                        Value::Literal(l) => self.stack.push(l),
+                        Value::Register(reg) => self.stack.push(self.registers[reg as usize]),
+                    };
+                }
+                Op::Pop(value) => {
+                    let Some(stack_value) = self.stack.pop() else {
+                        return Err(VMError::EmptyStack);
+                    };
+                    let Value::Register(reg) = value else {
+                        return Err(VMError::InvalidRegister(value));
+                    };
+                    self.registers[reg as usize] = stack_value;
+                }
             };
             self.pc += op.size();
         }
@@ -128,6 +166,9 @@ mod opcodes {
     pub const OPCODE_HALT: u16 = 0;
     pub const OPCODE_OUT: u16 = 19;
     pub const OPCODE_NOOP: u16 = 21;
+
+    pub const OPCODE_PUSH: u16 = 2;
+    pub const OPCODE_POP: u16 = 3;
 }
 
 #[derive(Debug, PartialEq)]
@@ -138,6 +179,10 @@ pub enum Op {
     Out(Value),
     /// Opcode 21
     Noop,
+    /// Opcode 2
+    Push(Value),
+    /// Opcode 3
+    Pop(Value),
 }
 
 impl Op {
@@ -146,6 +191,8 @@ impl Op {
             Op::Halt => 1,
             Op::Out(_) => 2,
             Op::Noop => 1,
+            Op::Push(_) => 2,
+            Op::Pop(_) => 2,
         }
     }
 }
@@ -161,7 +208,10 @@ impl Display for Value {
 
 #[cfg(test)]
 mod tests {
-    use crate::vm::{Op, VM, VMError, Value, opcodes};
+    use crate::vm::{
+        Op, VM, VMError, Value,
+        opcodes::{self, OPCODE_POP, OPCODE_PUSH},
+    };
 
     #[test]
     fn test_value_types() {
@@ -196,5 +246,26 @@ mod tests {
         let mut vm = VM::new_with_memory_slice(&mem);
         let _ = vm.run();
         assert_eq!(vm.pc, 2);
+    }
+
+    #[test]
+    fn test_decode_push_op() {
+        let mem = [OPCODE_PUSH, 32768 + 4];
+        let mut vm = VM::new_with_memory_slice(&mem);
+        let op = vm.decode_op();
+        assert_eq!(op, Ok(Op::Push(Value::Register(4))));
+
+        let mem = [OPCODE_PUSH, 4];
+        let mut vm = VM::new_with_memory_slice(&mem);
+        let op = vm.decode_op();
+        assert_eq!(op, Ok(Op::Push(Value::Literal(4))));
+    }
+
+    #[test]
+    fn test_push_pop() {
+        let mem = [OPCODE_PUSH, 4, OPCODE_POP, 3 + 32768];
+        let mut vm = VM::new_with_memory_slice(&mem);
+        vm.run().expect("VM run OK");
+        assert_eq!(vm.registers[3], 4);
     }
 }

@@ -6,4 +6,6 @@ pub enum VMError {
     InvalidOpcode(Value),
     InvalidProgramCounter(usize),
     InvalidMemoryAddress(usize),
+    InvalidRegister(Value),
+    EmptyStack,
 }
