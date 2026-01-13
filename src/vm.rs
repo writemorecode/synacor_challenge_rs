@@ -20,6 +20,23 @@ impl TryFrom<u16> for Value {
     }
 }
 
+impl From<Value> for u16 {
+    fn from(value: Value) -> Self {
+        match value {
+            Value::Literal(l) => l,
+            Value::Register(r) => r + 32768,
+        }
+    }
+}
+impl From<&Value> for u16 {
+    fn from(value: &Value) -> Self {
+        match value {
+            Value::Literal(l) => *l,
+            Value::Register(r) => r + 32768,
+        }
+    }
+}
+
 const MEMORY_SIZE: usize = 2 << (16 - 1);
 const REGISTER_COUNT: usize = 8;
 
@@ -129,6 +146,7 @@ impl VM {
     pub fn run(&mut self) -> Result<(), VMError> {
         loop {
             let op = self.decode_op()?;
+            dbg!(&op);
             match op {
                 Op::Halt => {
                     println!("HALTING");
@@ -210,8 +228,40 @@ impl Display for Value {
 mod tests {
     use crate::vm::{
         Op, VM, VMError, Value,
-        opcodes::{self, OPCODE_POP, OPCODE_PUSH},
+        opcodes::{self, OPCODE_HALT, OPCODE_NOOP, OPCODE_OUT, OPCODE_POP, OPCODE_PUSH},
     };
+
+    fn encode_ops(ops: &[Op]) -> Vec<u16> {
+        let mut v = Vec::new();
+        for op in ops {
+            match op {
+                Op::Halt => v.push(OPCODE_HALT),
+                Op::Out(value) => {
+                    v.push(OPCODE_OUT);
+                    v.push(value.into());
+                }
+                Op::Noop => v.push(OPCODE_NOOP),
+                Op::Push(value) => {
+                    v.push(OPCODE_PUSH);
+                    v.push(value.into());
+                }
+                Op::Pop(value) => {
+                    v.push(OPCODE_POP);
+                    v.push(value.into());
+                }
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn test_encode_ops() {
+        let ops = [Op::Push(Value::Literal(123)), Op::Pop(Value::Register(2))];
+        let mem = encode_ops(&ops);
+        let mut vm = VM::new_with_memory_slice(&mem);
+        vm.run().expect("vm run ok");
+        assert_eq!(vm.registers[2], 123);
+    }
 
     #[test]
     fn test_value_types() {
