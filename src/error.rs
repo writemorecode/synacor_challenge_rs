@@ -8,4 +8,8 @@ pub enum VMError {
     InvalidMemoryAddress(usize),
     InvalidRegister(Value),
     EmptyStack,
+    DivisionByZero,
+    InvalidBinaryLength(usize),
+    ProgramTooLarge(usize),
+    IoError(String),
 }
