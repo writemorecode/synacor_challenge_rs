@@ -50,6 +50,12 @@ pub struct VM {
     input_buffer: VecDeque<u16>,
 }
 
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+pub enum StepResult {
+    Continue,
+    Halted,
+}
+
 impl Default for VM {
     fn default() -> Self {
         Self {
@@ -286,121 +292,124 @@ impl VM {
     }
 
     pub fn run(&mut self) -> Result<(), VMError> {
-        let mut stdout = io::stdout();
-        loop {
-            let op = self.decode_op()?;
-            let mut next_pc = self.pc + op.size();
-            match op {
-                Op::Halt => {
-                    break;
-                }
-                Op::Set(reg, value) => {
-                    let v = self.read(value);
-                    self.write_register(reg, v)?;
-                }
-                Op::Push(value) => {
-                    self.stack.push(self.read(value));
-                }
-                Op::Pop(value) => {
-                    let Some(stack_value) = self.stack.pop() else {
-                        return Err(VMError::EmptyStack);
-                    };
-                    self.write_register(value, stack_value)?;
-                }
-                Op::Eq(d, l, r) => {
-                    let res = if self.read(l) == self.read(r) { 1 } else { 0 };
-                    self.write_register(d, res)?;
-                }
-                Op::Gt(d, l, r) => {
-                    let res = if self.read(l) > self.read(r) { 1 } else { 0 };
-                    self.write_register(d, res)?;
-                }
-                Op::Jmp(dest) => {
-                    next_pc = self.read_address(dest)?;
-                }
-                Op::Jt(cond, dest) => {
-                    if self.read(cond) != 0 {
-                        next_pc = self.read_address(dest)?;
-                    }
-                }
-                Op::Jf(cond, dest) => {
-                    if self.read(cond) == 0 {
-                        next_pc = self.read_address(dest)?;
-                    }
-                }
-                Op::Add(d, l, r) => {
-                    let a = self.read(l);
-                    let b = self.read(r);
-                    let c = (a + b) % 32768;
-                    self.write_register(d, c)?;
-                }
-                Op::Mult(d, l, r) => {
-                    let a = self.read(l) as u32;
-                    let b = self.read(r) as u32;
-                    let c = ((a * b) % 32768) as u16;
-                    self.write_register(d, c)?;
-                }
-                Op::Mod(d, l, r) => {
-                    let b = self.read(r);
-                    if b == 0 {
-                        return Err(VMError::DivisionByZero);
-                    }
-                    let c = self.read(l) % b;
-                    self.write_register(d, c)?;
-                }
-                Op::And(d, l, r) => {
-                    let c = self.read(l) & self.read(r);
-                    self.write_register(d, c)?;
-                }
-                Op::Or(d, l, r) => {
-                    let c = self.read(l) | self.read(r);
-                    self.write_register(d, c)?;
-                }
-                Op::Not(d, value) => {
-                    let c = !self.read(value) & 0x7FFF;
-                    self.write_register(d, c)?;
-                }
-                Op::Rmem(d, addr) => {
-                    let address = self.read_address(addr)?;
-                    let value = self.memory[address];
-                    self.write_register(d, value)?;
-                }
-                Op::Wmem(addr, value) => {
-                    let address = self.read_address(addr)?;
-                    self.memory[address] = self.read(value);
-                }
-                Op::Call(dest) => {
-                    self.stack.push(next_pc as u16);
-                    next_pc = self.read_address(dest)?;
-                }
-                Op::Ret => {
-                    let Some(address) = self.stack.pop() else {
-                        break;
-                    };
-                    let address = address as usize;
-                    if address >= MEMORY_SIZE {
-                        return Err(VMError::InvalidMemoryAddress(address));
-                    }
-                    next_pc = address;
-                }
-                Op::Out(value) => {
-                    let byte = self.read(value) as u8;
-                    stdout
-                        .write_all(&[byte])
-                        .map_err(|err| VMError::IoError(err.to_string()))?;
-                    stdout
-                        .flush()
-                        .map_err(|err| VMError::IoError(err.to_string()))?;
-                }
-                Op::In(dest) => {
-                    let value = self.read_input_char()?;
-                    self.write_register(dest, value)?;
-                }
-                Op::Noop => {}
-            };
-            self.pc = next_pc;
-        }
+        while let StepResult::Continue = self.step()? {}
         Ok(())
+    }
+
+    pub fn step(&mut self) -> Result<StepResult, VMError> {
+        let op = self.decode_op()?;
+        let mut next_pc = self.pc + op.size();
+        match op {
+            Op::Halt => {
+                return Ok(StepResult::Halted);
+            }
+            Op::Set(reg, value) => {
+                let v = self.read(value);
+                self.write_register(reg, v)?;
+            }
+            Op::Push(value) => {
+                self.stack.push(self.read(value));
+            }
+            Op::Pop(value) => {
+                let Some(stack_value) = self.stack.pop() else {
+                    return Err(VMError::EmptyStack);
+                };
+                self.write_register(value, stack_value)?;
+            }
+            Op::Eq(d, l, r) => {
+                let res = if self.read(l) == self.read(r) { 1 } else { 0 };
+                self.write_register(d, res)?;
+            }
+            Op::Gt(d, l, r) => {
+                let res = if self.read(l) > self.read(r) { 1 } else { 0 };
+                self.write_register(d, res)?;
+            }
+            Op::Jmp(dest) => {
+                next_pc = self.read_address(dest)?;
+            }
+            Op::Jt(cond, dest) => {
+                if self.read(cond) != 0 {
+                    next_pc = self.read_address(dest)?;
+                }
+            }
+            Op::Jf(cond, dest) => {
+                if self.read(cond) == 0 {
+                    next_pc = self.read_address(dest)?;
+                }
+            }
+            Op::Add(d, l, r) => {
+                let a = self.read(l);
+                let b = self.read(r);
+                let c = (a + b) % 32768;
+                self.write_register(d, c)?;
+            }
+            Op::Mult(d, l, r) => {
+                let a = self.read(l) as u32;
+                let b = self.read(r) as u32;
+                let c = ((a * b) % 32768) as u16;
+                self.write_register(d, c)?;
+            }
+            Op::Mod(d, l, r) => {
+                let b = self.read(r);
+                if b == 0 {
+                    return Err(VMError::DivisionByZero);
+                }
+                let c = self.read(l) % b;
+                self.write_register(d, c)?;
+            }
+            Op::And(d, l, r) => {
+                let c = self.read(l) & self.read(r);
+                self.write_register(d, c)?;
+            }
+            Op::Or(d, l, r) => {
+                let c = self.read(l) | self.read(r);
+                self.write_register(d, c)?;
+            }
+            Op::Not(d, value) => {
+                let c = !self.read(value) & 0x7FFF;
+                self.write_register(d, c)?;
+            }
+            Op::Rmem(d, addr) => {
+                let address = self.read_address(addr)?;
+                let value = self.memory[address];
+                self.write_register(d, value)?;
+            }
+            Op::Wmem(addr, value) => {
+                let address = self.read_address(addr)?;
+                self.memory[address] = self.read(value);
+            }
+            Op::Call(dest) => {
+                self.stack.push(next_pc as u16);
+                next_pc = self.read_address(dest)?;
+            }
+            Op::Ret => {
+                let Some(address) = self.stack.pop() else {
+                    return Ok(StepResult::Halted);
+                };
+                let address = address as usize;
+                if address >= MEMORY_SIZE {
+                    return Err(VMError::InvalidMemoryAddress(address));
+                }
+                next_pc = address;
+            }
+            Op::Out(value) => {
+                let byte = self.read(value) as u8;
+                let mut stdout = io::stdout();
+                stdout
+                    .write_all(&[byte])
+                    .map_err(|err| VMError::IoError(err.to_string()))?;
+                stdout
+                    .flush()
+                    .map_err(|err| VMError::IoError(err.to_string()))?;
+            }
+            Op::In(dest) => {
+                let value = self.read_input_char()?;
+                self.write_register(dest, value)?;
+            }
+            Op::Noop => {}
+        };
+        self.pc = next_pc;
+        Ok(StepResult::Continue)
     }
 }
 
