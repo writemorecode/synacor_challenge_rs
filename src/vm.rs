@@ -69,17 +69,17 @@ impl Default for VM {
 }
 
 impl VM {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self::default()
     }
 
-    pub fn new_with_memory(memory: [u16; MEMORY_SIZE]) -> Self {
+    fn new_with_memory(memory: [u16; MEMORY_SIZE]) -> Self {
         let mut vm = VM::new();
         vm.memory = memory;
         vm
     }
 
-    pub fn new_with_memory_slice(mem_slice: &[u16]) -> Self {
+    fn new_with_memory_slice(mem_slice: &[u16]) -> Self {
         assert!(mem_slice.len() <= MEMORY_SIZE, "Memory slice too large.");
         let mem = {
             let mut full_mem = [0u16; MEMORY_SIZE];
@@ -108,14 +108,14 @@ impl VM {
         Ok(words)
     }
 
-    pub fn read_pc(&self) -> Result<u16, VMError> {
+    fn read_pc(&self) -> Result<u16, VMError> {
         match self.memory.get(self.pc) {
             Some(&value) => Ok(value),
             None => Err(VMError::InvalidProgramCounter(self.pc)),
         }
     }
 
-    pub fn read_value_at_pc(&self) -> Result<Value, VMError> {
+    fn read_value_at_pc(&self) -> Result<Value, VMError> {
         let instr = self.read_pc()?;
         let value = Value::try_from(instr)?;
         Ok(value)
@@ -128,7 +128,7 @@ impl VM {
         Value::try_from(data)
     }
 
-    pub fn decode_op(&mut self) -> Result<Op, VMError> {
+    fn decode_op(&mut self) -> Result<Op, VMError> {
         let value = self.read_value_at_pc()?;
         let Value::Literal(lit_val) = value else {
             return Err(VMError::InvalidOpcode(value));
