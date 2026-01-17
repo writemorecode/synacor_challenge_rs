@@ -525,4 +525,321 @@ impl Display for Value {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+
+    fn reg(index: u16) -> u16 {
+        u16::from(Value::Register(index))
+    }
+
+    fn make_vm(program: &[u16]) -> VM {
+        VM::new_with_memory_slice(program)
+    }
+
+    fn step_ok(vm: &mut VM) -> StepResult {
+        vm.step().expect("step should succeed")
+    }
+
+    #[test]
+    fn value_try_from_literal_and_register() {
+        assert_eq!(Value::try_from(0).unwrap(), Value::Literal(0));
+        assert_eq!(Value::try_from(32767).unwrap(), Value::Literal(32767));
+        assert_eq!(Value::try_from(32768).unwrap(), Value::Register(0));
+        assert_eq!(Value::try_from(32775).unwrap(), Value::Register(7));
+        assert_eq!(
+            Value::try_from(32776).unwrap_err(),
+            VMError::InvalidValueError(32776)
+        );
+    }
+
+    #[test]
+    fn value_to_u16_encodes_registers() {
+        assert_eq!(u16::from(Value::Literal(123)), 123);
+        assert_eq!(u16::from(Value::Register(2)), 32770);
+        assert_eq!(u16::from(&Value::Register(3)), 32771);
+    }
+
+    #[test]
+    fn decode_program_bytes_validates_length() {
+        let bytes = [1u8, 0u8, 2u8, 0u8];
+        let words = VM::decode_program_bytes(&bytes).unwrap();
+        assert_eq!(words, vec![1, 2]);
+
+        let err = VM::decode_program_bytes(&[1u8]).unwrap_err();
+        assert_eq!(err, VMError::InvalidBinaryLength(1));
+    }
+
+    #[test]
+    fn decode_program_bytes_rejects_oversize_programs() {
+        let bytes = vec![0u8; (MEMORY_SIZE + 1) * 2];
+        let err = VM::decode_program_bytes(&bytes).unwrap_err();
+        assert_eq!(err, VMError::ProgramTooLarge(MEMORY_SIZE + 1));
+    }
+
+    #[test]
+    fn decode_op_rejects_register_as_opcode() {
+        let mut vm = make_vm(&[reg(0)]);
+        let err = vm.decode_op().unwrap_err();
+        assert_eq!(err, VMError::InvalidOpcode(Value::Register(0)));
+    }
+
+    #[test]
+    fn read_pc_rejects_invalid_program_counter() {
+        let mut vm = make_vm(&[]);
+        vm.pc = MEMORY_SIZE;
+        let err = vm.read_pc().unwrap_err();
+        assert_eq!(err, VMError::InvalidProgramCounter(MEMORY_SIZE));
+    }
+
+    #[test]
+    fn decode_op_rejects_missing_operands_at_end_of_memory() {
+        let mut vm = VM::new();
+        vm.pc = MEMORY_SIZE - 2;
+        vm.memory[MEMORY_SIZE - 2] = opcodes::OPCODE_SET;
+        vm.memory[MEMORY_SIZE - 1] = reg(0);
+        let err = vm.decode_op().unwrap_err();
+        assert_eq!(err, VMError::InvalidMemoryAddress(MEMORY_SIZE));
+    }
+
+    #[test]
+    fn step_set_updates_register_and_pc() {
+        let mut vm = make_vm(&[
+            opcodes::OPCODE_SET,
+            reg(0),
+            123,
+            opcodes::OPCODE_HALT,
+        ]);
+        assert_eq!(step_ok(&mut vm), StepResult::Continue);
+        assert_eq!(vm.registers[0], 123);
+        assert_eq!(vm.pc, 3);
+        assert_eq!(vm.step().unwrap(), StepResult::Halted);
+    }
+
+    #[test]
+    fn step_set_rejects_literal_destination() {
+        let mut vm = make_vm(&[opcodes::OPCODE_SET, 1, 2]);
+        let err = vm.step().unwrap_err();
+        assert_eq!(err, VMError::InvalidRegister(Value::Literal(1)));
+    }
+
+    #[test]
+    fn step_push_pop_round_trip() {
+        let mut vm = make_vm(&[
+            opcodes::OPCODE_PUSH,
+            7,
+            opcodes::OPCODE_POP,
+            reg(1),
+            opcodes::OPCODE_HALT,
+        ]);
+        assert_eq!(step_ok(&mut vm), StepResult::Continue);
+        assert_eq!(vm.stack, vec![7]);
+        assert_eq!(step_ok(&mut vm), StepResult::Continue);
+        assert_eq!(vm.registers[1], 7);
+        assert!(vm.stack.is_empty());
+    }
+
+    #[test]
+    fn step_pop_rejects_empty_stack() {
+        let mut vm = make_vm(&[opcodes::OPCODE_POP, reg(0)]);
+        let err = vm.step().unwrap_err();
+        assert_eq!(err, VMError::EmptyStack);
+    }
+
+    #[test]
+    fn step_eq_gt_write_boolean_results() {
+        let mut vm = make_vm(&[
+            opcodes::OPCODE_EQ,
+            reg(2),
+            reg(0),
+            reg(1),
+            opcodes::OPCODE_GT,
+            reg(3),
+            reg(0),
+            reg(1),
+            opcodes::OPCODE_HALT,
+        ]);
+        vm.registers[0] = 5;
+        vm.registers[1] = 5;
+        assert_eq!(step_ok(&mut vm), StepResult::Continue);
+        assert_eq!(vm.registers[2], 1);
+        assert_eq!(step_ok(&mut vm), StepResult::Continue);
+        assert_eq!(vm.registers[3], 0);
+    }
+
+    #[test]
+    fn step_jmp_updates_pc() {
+        let mut vm = make_vm(&[
+            opcodes::OPCODE_JMP,
+            4,
+            opcodes::OPCODE_HALT,
+            opcodes::OPCODE_HALT,
+            opcodes::OPCODE_HALT,
+        ]);
+        assert_eq!(step_ok(&mut vm), StepResult::Continue);
+        assert_eq!(vm.pc, 4);
+    }
+
+    #[test]
+    fn step_jt_jumps_when_nonzero() {
+        let mut vm = make_vm(&[
+            opcodes::OPCODE_JT,
+            reg(0),
+            5,
+            opcodes::OPCODE_HALT,
+            opcodes::OPCODE_NOOP,
+            opcodes::OPCODE_SET,
+            reg(1),
+            9,
+            opcodes::OPCODE_HALT,
+        ]);
+        vm.registers[0] = 1;
+        assert_eq!(step_ok(&mut vm), StepResult::Continue);
+        assert_eq!(vm.pc, 5);
+        assert_eq!(step_ok(&mut vm), StepResult::Continue);
+        assert_eq!(vm.registers[1], 9);
+    }
+
+    #[test]
+    fn step_jf_jumps_when_zero() {
+        let mut vm = make_vm(&[
+            opcodes::OPCODE_JF,
+            reg(0),
+            6,
+            opcodes::OPCODE_SET,
+            reg(1),
+            1,
+            opcodes::OPCODE_SET,
+            reg(1),
+            2,
+            opcodes::OPCODE_HALT,
+        ]);
+        vm.registers[0] = 0;
+        assert_eq!(step_ok(&mut vm), StepResult::Continue);
+        assert_eq!(vm.pc, 6);
+        assert_eq!(step_ok(&mut vm), StepResult::Continue);
+        assert_eq!(vm.registers[1], 2);
+    }
+
+    #[test]
+    fn step_add_mult_mod_apply_15bit_math() {
+        let mut vm = make_vm(&[
+            opcodes::OPCODE_ADD,
+            reg(2),
+            reg(0),
+            reg(1),
+            opcodes::OPCODE_MULT,
+            reg(3),
+            reg(0),
+            reg(1),
+            opcodes::OPCODE_MOD,
+            reg(4),
+            reg(0),
+            reg(1),
+            opcodes::OPCODE_HALT,
+        ]);
+        vm.registers[0] = 32767;
+        vm.registers[1] = 2;
+        assert_eq!(step_ok(&mut vm), StepResult::Continue);
+        assert_eq!(vm.registers[2], 1);
+        assert_eq!(step_ok(&mut vm), StepResult::Continue);
+        assert_eq!(vm.registers[3], 32766);
+        assert_eq!(step_ok(&mut vm), StepResult::Continue);
+        assert_eq!(vm.registers[4], 1);
+    }
+
+    #[test]
+    fn step_mod_rejects_division_by_zero() {
+        let mut vm = make_vm(&[opcodes::OPCODE_MOD, reg(0), 5, 0]);
+        let err = vm.step().unwrap_err();
+        assert_eq!(err, VMError::DivisionByZero);
+    }
+
+    #[test]
+    fn step_and_or_not_apply_bitwise_ops() {
+        let mut vm = make_vm(&[
+            opcodes::OPCODE_AND,
+            reg(2),
+            reg(0),
+            reg(1),
+            opcodes::OPCODE_OR,
+            reg(3),
+            reg(0),
+            reg(1),
+            opcodes::OPCODE_NOT,
+            reg(4),
+            reg(0),
+            opcodes::OPCODE_HALT,
+        ]);
+        vm.registers[0] = 0b1010;
+        vm.registers[1] = 0b1100;
+        assert_eq!(step_ok(&mut vm), StepResult::Continue);
+        assert_eq!(vm.registers[2], 0b1000);
+        assert_eq!(step_ok(&mut vm), StepResult::Continue);
+        assert_eq!(vm.registers[3], 0b1110);
+        assert_eq!(step_ok(&mut vm), StepResult::Continue);
+        assert_eq!(vm.registers[4], (!0b1010u16) & 0x7FFF);
+    }
+
+    #[test]
+    fn step_rmem_wmem_round_trip() {
+        let mut vm = make_vm(&[
+            opcodes::OPCODE_WMEM,
+            10,
+            123,
+            opcodes::OPCODE_RMEM,
+            reg(0),
+            10,
+            opcodes::OPCODE_HALT,
+        ]);
+        assert_eq!(step_ok(&mut vm), StepResult::Continue);
+        assert_eq!(vm.memory[10], 123);
+        assert_eq!(step_ok(&mut vm), StepResult::Continue);
+        assert_eq!(vm.registers[0], 123);
+    }
+
+    #[test]
+    fn step_call_and_ret_restore_pc() {
+        let mut vm = make_vm(&[
+            opcodes::OPCODE_CALL,
+            3,
+            opcodes::OPCODE_HALT,
+            opcodes::OPCODE_SET,
+            reg(0),
+            42,
+            opcodes::OPCODE_RET,
+            opcodes::OPCODE_HALT,
+        ]);
+        assert_eq!(step_ok(&mut vm), StepResult::Continue);
+        assert_eq!(vm.pc, 3);
+        assert_eq!(vm.stack, vec![2]);
+        assert_eq!(step_ok(&mut vm), StepResult::Continue);
+        assert_eq!(vm.registers[0], 42);
+        assert_eq!(step_ok(&mut vm), StepResult::Continue);
+        assert_eq!(vm.pc, 2);
+    }
+
+    #[test]
+    fn step_ret_on_empty_stack_halts() {
+        let mut vm = make_vm(&[opcodes::OPCODE_RET]);
+        assert_eq!(vm.step().unwrap(), StepResult::Halted);
+    }
+
+    #[test]
+    fn step_out_in_noop_execute() {
+        let mut vm = make_vm(&[
+            opcodes::OPCODE_OUT,
+            b'A' as u16,
+            opcodes::OPCODE_IN,
+            reg(0),
+            opcodes::OPCODE_NOOP,
+            opcodes::OPCODE_HALT,
+        ]);
+        vm.input_buffer.push_back(b'Z' as u16);
+        assert_eq!(step_ok(&mut vm), StepResult::Continue);
+        assert_eq!(vm.pc, 2);
+        assert_eq!(step_ok(&mut vm), StepResult::Continue);
+        assert_eq!(vm.registers[0], b'Z' as u16);
+        assert_eq!(step_ok(&mut vm), StepResult::Continue);
+        assert_eq!(vm.pc, 5);
+    }
+}
